@@ -1,10 +1,10 @@
 //
 //  MouseStomp.swift
-//  משחק AR: דורכים על עכברים, לא דורכים על הדמות הצהובה.
+//  AR game: stomp the mice, never stomp the yellow buddy.
 //
-//  שימוש: ב-Xcode צור פרויקט iOS App (SwiftUI), מחק את קובץ ה-App וה-ContentView
-//  שנוצרו אוטומטית, והדבק את הקובץ הזה במקומם.
-//  חובה: להוסיף ב-Info את המפתח "Privacy - Camera Usage Description".
+//  Setup: in Xcode create an iOS App project (SwiftUI), delete the generated
+//  App and ContentView files, and paste this file in their place.
+//  Required: add the key "Privacy - Camera Usage Description" in the target's Info tab.
 //
 
 import SwiftUI
@@ -20,18 +20,18 @@ struct MouseStompApp: App {
     }
 }
 
-// MARK: - מצב המשחק (מה שמוצג על המסך)
+// MARK: - Game state (what the UI shows)
 
 final class GameModel: ObservableObject {
     @Published var lives = 3
     @Published var score = 0
     @Published var isGameOver = false
     @Published var isPlaying = false
-    @Published var status = "מחפש רצפה… כוון את המצלמה לרצפה והזז את הפלאפון לאט"
+    @Published var status = "Looking for the floor... point the camera at the floor and move slowly"
     @Published var toast: String?
 }
 
-// MARK: - יצור במשחק (עכבר או דמות צהובה)
+// MARK: - Helpers
 
 func randomDir() -> SIMD3<Float> {
     let a = Float.random(in: 0..<(2 * .pi))
@@ -41,6 +41,8 @@ func randomDir() -> SIMD3<Float> {
 func rotateY(_ v: SIMD3<Float>, by a: Float) -> SIMD3<Float> {
     SIMD3<Float>(v.x * cos(a) - v.z * sin(a), 0, v.x * sin(a) + v.z * cos(a))
 }
+
+// MARK: - A creature in the game (mouse or yellow buddy)
 
 final class Critter {
     enum Mode { case wander, dash, flee }
@@ -63,7 +65,7 @@ final class Critter {
     }
 }
 
-// MARK: - בניית המודלים (מצורות פשוטות, בלי קבצים חיצוניים)
+// MARK: - Models (built from simple shapes, no external files)
 
 private func mat(_ c: UIColor) -> SimpleMaterial {
     SimpleMaterial(color: c, isMetallic: false)
@@ -76,42 +78,42 @@ private func part(_ r: Float, _ c: UIColor, _ p: SIMD3<Float>, _ s: SIMD3<Float>
     return e
 }
 
-/// עכבר. הפנים שלו הן לכיוון ציר Z החיובי.
+/// A mouse. It faces the positive Z axis.
 func makeMouse() -> Entity {
     let root = Entity()
     let gray = UIColor(white: 0.45, alpha: 1)
     let pink = UIColor(red: 1, green: 0.62, blue: 0.7, alpha: 1)
 
-    root.addChild(part(0.04, gray, [0, 0.03, 0], [1, 0.8, 1.8]))            // גוף
-    root.addChild(part(0.028, gray, [0, 0.035, 0.085], [1, 1, 1.2]))        // ראש
-    root.addChild(part(0.008, pink, [0, 0.033, 0.118]))                     // אף
+    root.addChild(part(0.04, gray, [0, 0.03, 0], [1, 0.8, 1.8]))              // body
+    root.addChild(part(0.028, gray, [0, 0.035, 0.085], [1, 1, 1.2]))          // head
+    root.addChild(part(0.008, pink, [0, 0.033, 0.118]))                       // nose
     for x: Float in [-0.014, 0.014] {
-        root.addChild(part(0.006, .black, [x, 0.045, 0.1]))                 // עיניים
-        root.addChild(part(0.02, pink, [x * 1.5, 0.065, 0.075], [1, 1, 0.3])) // אוזניים
+        root.addChild(part(0.006, .black, [x, 0.045, 0.1]))                   // eyes
+        root.addChild(part(0.02, pink, [x * 1.5, 0.065, 0.075], [1, 1, 0.3])) // ears
     }
-    root.addChild(part(0.01, pink, [0, 0.015, -0.15], [1, 1, 8]))           // זנב
+    root.addChild(part(0.01, pink, [0, 0.015, -0.15], [1, 1, 8]))             // tail
     return root
 }
 
-/// דמות צהובה "קפסולה" גנרית (אפשר להחליף בקובץ USDZ משלך, ראה הערה בהסבר).
+/// A generic yellow capsule buddy (you can swap it for your own USDZ model).
 func makeBuddy() -> Entity {
     let root = Entity()
     let yellow = UIColor(red: 1, green: 0.85, blue: 0.1, alpha: 1)
     let blue = UIColor(red: 0.15, green: 0.3, blue: 0.7, alpha: 1)
 
-    root.addChild(part(0.07, yellow, [0, 0.14, 0], [1, 2.0, 1]))            // גוף
-    root.addChild(part(0.072, blue, [0, 0.06, 0], [1, 0.9, 1]))             // מכנסיים
+    root.addChild(part(0.07, yellow, [0, 0.14, 0], [1, 2.0, 1]))              // body
+    root.addChild(part(0.072, blue, [0, 0.06, 0], [1, 0.9, 1]))               // pants
     for x: Float in [-0.03, 0.03] {
-        root.addChild(part(0.022, .white, [x, 0.2, 0.058]))                 // עיניים
-        root.addChild(part(0.01, .black, [x, 0.2, 0.076]))                  // אישונים
+        root.addChild(part(0.022, .white, [x, 0.2, 0.058]))                   // eyes
+        root.addChild(part(0.01, .black, [x, 0.2, 0.076]))                    // pupils
     }
     for x: Float in [-0.078, 0.078] {
-        root.addChild(part(0.03, yellow, [x, 0.13, 0], [0.5, 1.5, 0.5]))    // ידיים
+        root.addChild(part(0.03, yellow, [x, 0.13, 0], [0.5, 1.5, 0.5]))      // arms
     }
     return root
 }
 
-// MARK: - בקר המשחק
+// MARK: - Game controller
 
 final class GameController: NSObject, ObservableObject, ARSessionDelegate {
     let model = GameModel()
@@ -137,7 +139,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
     private var invulnerableUntil: Double = 0
     private var level = 0
 
-    // MARK: התחלה
+    // MARK: Start
 
     func start() {
         guard !started else { return }
@@ -153,7 +155,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
             self?.update(dt: Float(ev.deltaTime))
         }
 
-        // אם לא נמצאה רצפה תוך 8 שניות, מניחים שהרצפה כ-1.3 מטר מתחת לפלאפון
+        // If no floor is found within 8 seconds, assume the floor is 1.3 m below the phone
         fallbackTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
             guard let self, self.floorY == nil else { return }
             self.floorY = self.arView.cameraTransform.translation.y - 1.3
@@ -161,7 +163,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    // MARK: זיהוי רצפה
+    // MARK: Floor detection
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { handle(anchors) }
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { handle(anchors) }
@@ -172,7 +174,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         for a in anchors {
             guard let plane = a as? ARPlaneAnchor, plane.alignment == .horizontal else { continue }
             let y = plane.transform.columns.3.y
-            // רק משטח שנמצא לפחות 70 ס"מ מתחת למצלמה נחשב רצפה (ולא שולחן)
+            // Only a surface at least 70 cm below the camera counts as floor (not a table)
             if camY - y > 0.7 { floorY = min(floorY ?? y, y) }
         }
         if floorY != nil { beginGame() }
@@ -203,7 +205,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         spawnMinion()
     }
 
-    // MARK: עזרים
+    // MARK: Utilities
 
     private var playerPos: SIMD3<Float> {
         let c = arView.cameraTransform.translation
@@ -221,10 +223,10 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         e.orientation = simd_quatf(angle: atan2(dir.x, dir.z), axis: [0, 1, 0])
     }
 
-    // MARK: יצירת עכבר ודמות
+    // MARK: Spawning
 
     private func spawnMouse() {
-        // כל עכבר חדש גדול ומהיר יותר
+        // Every new mouse is bigger and faster than the last
         let s = min(1.2 + 0.45 * Float(level), 4.0)
         let e = makeMouse()
         e.scale = SIMD3<Float>(repeating: s)
@@ -246,7 +248,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         minions.append(Critter(entity: e, pos: pos, speed: 0.3, scale: 1.2))
     }
 
-    // MARK: סימון הרגל (עיגול על הרצפה)
+    // MARK: Foot marker (the circle on the floor)
 
     private func setupMarker() {
         markerMat.blending = .transparent(opacity: .init(floatLiteral: 0.45))
@@ -265,7 +267,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         marker?.position = stompPoint + SIMD3<Float>(0, 0.004, 0)
     }
 
-    // MARK: לולאת המשחק
+    // MARK: Game loop
 
     private func update(dt rawDt: Float) {
         guard model.isPlaying, !model.isGameOver, floorY != nil else { return }
@@ -319,12 +321,12 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         m.entity.position = m.pos
         face(m.entity, m.dir)
 
-        // נשיכה
+        // Bite
         let biteRadius = 0.18 + 0.07 * m.scale
         if dist < biteRadius, time > invulnerableUntil, m.mode != .flee {
             m.mode = .flee
             m.modeUntil = time + 2
-            loseLife("🐭 העכבר נשך אותך ברגל!")
+            loseLife("🐭 The mouse bit your leg!")
         }
     }
 
@@ -344,7 +346,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         face(c.entity, c.dir)
     }
 
-    // MARK: דריכה
+    // MARK: Stomping
 
     func stomp() {
         guard model.isPlaying, !model.isGameOver else { return }
@@ -386,7 +388,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         model.score += 1
         UINotificationFeedbackGenerator().notificationOccurred(.success)
 
-        // אחרי שהרגת עכבר מגיע עכבר גדול יותר
+        // After you kill a mouse, a bigger one shows up
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
             guard let self, self.model.isPlaying, !self.model.isGameOver, self.mouse == nil else { return }
             self.spawnMouse()
@@ -396,7 +398,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
     private func killMinion(_ c: Critter) {
         minions.removeAll { $0 === c }
         squash(c.entity)
-        loseLife("😢 דרכת על הדמות הצהובה!")
+        loseLife("😢 You stomped the yellow buddy!")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
             guard let self, self.model.isPlaying, !self.model.isGameOver, self.minions.count < 2 else { return }
@@ -404,7 +406,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    // MARK: חיים
+    // MARK: Lives
 
     private func loseLife(_ why: String) {
         invulnerableUntil = time + 1.5
@@ -422,7 +424,7 @@ final class GameController: NSObject, ObservableObject, ARSessionDelegate {
     }
 }
 
-// MARK: - תצוגה
+// MARK: - UI
 
 struct ARViewContainer: UIViewRepresentable {
     let arView: ARView
@@ -482,7 +484,7 @@ struct HUDView: View {
 
                 if model.isPlaying && !model.isGameOver {
                     Button(action: onStomp) {
-                        Text("👣 דרוך!")
+                        Text("👣 STOMP!")
                             .font(.system(size: 34, weight: .heavy))
                             .foregroundStyle(.white)
                             .frame(maxWidth: .infinity)
@@ -497,8 +499,8 @@ struct HUDView: View {
             if model.isGameOver {
                 VStack(spacing: 18) {
                     Text("GAME OVER").font(.system(size: 44, weight: .black))
-                    Text("הרגת \(model.score) עכברים").font(.title)
-                    Button("שחק שוב", action: onRestart)
+                    Text("You stomped \(model.score) mice").font(.title)
+                    Button("Play again", action: onRestart)
                         .font(.title2.bold())
                         .buttonStyle(.borderedProminent)
                         .controlSize(.large)
