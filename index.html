@@ -1,514 +1,335 @@
-//
-//  MouseStomp.swift
-//  AR game: stomp the mice, never stomp the yellow buddy.
-//
-//  Setup: in Xcode create an iOS App project (SwiftUI), delete the generated
-//  App and ContentView files, and paste this file in their place.
-//  Required: add the key "Privacy - Camera Usage Description" in the target's Info tab.
-//
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Mouse Stomp AR</title>
+<style>
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  [hidden]{display:none!important}
+  html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#fff;
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    touch-action:none;user-select:none;-webkit-user-select:none}
+  #cam,#c{position:fixed;inset:0;width:100%;height:100%}
+  #cam{object-fit:cover;background:linear-gradient(#3a5a40,#1c2a20)}
+  #hud{position:fixed;inset:0;pointer-events:none;display:flex;flex-direction:column;
+    padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+  #top{display:flex;justify-content:space-between;align-items:center;padding:10px 16px;
+    background:rgba(0,0,0,.4);font-size:28px;font-weight:800}
+  #toast{align-self:center;margin-top:12px;padding:10px 16px;border-radius:12px;
+    background:rgba(16,21,28,.85);font-weight:700;font-size:18px;text-align:center;
+    opacity:0;transition:opacity .2s}
+  #toast.on{opacity:1}
+  #note{align-self:center;margin:auto 16px 0;padding:8px 12px;border-radius:10px;
+    background:rgba(16,21,28,.7);font-size:14px;text-align:center}
+  #stomp{pointer-events:auto;margin:14px 28px 22px;padding:22px;border:0;border-radius:22px;
+    background:#e5322d;color:#fff;font:900 34px system-ui,sans-serif;letter-spacing:.02em;
+    box-shadow:0 6px 0 #8f1d1a}
+  #stomp:active{transform:translateY(4px);box-shadow:0 2px 0 #8f1d1a}
+  .panel{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:16px;padding:28px;text-align:center;background:rgba(16,21,28,.9)}
+  .panel h1{margin:0;font-size:40px;line-height:1.1}
+  .panel p{margin:0;max-width:34ch;font-size:17px;line-height:1.45;color:#dfe5ec}
+  .panel button{padding:16px 40px;border:0;border-radius:16px;background:#ffd21f;color:#10151c;
+    font:800 22px system-ui,sans-serif}
+  .small{font-size:14px!important;color:#9aa6b4!important}
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="c"></canvas>
 
-import SwiftUI
-import RealityKit
-import ARKit
+<div id="hud">
+  <div id="top"><span id="lives"></span><span id="score"></span></div>
+  <div id="toast"></div>
+  <div id="note" hidden></div>
+  <button id="stomp" hidden>STOMP!</button>
+</div>
 
-// MARK: - App
+<div id="start" class="panel">
+  <h1>Mouse Stomp AR</h1>
+  <p>Point your phone at the floor. Line the ring up with the mouse and tap STOMP. Every mouse you squash is replaced by a bigger, faster one.</p>
+  <p>Don't stomp the yellow buddy, and don't let a mouse bite your leg. You have 3 lives.</p>
+  <button id="go">Start</button>
+  <p class="small">Needs camera and motion access, and must be opened over https.</p>
+</div>
 
-@main
-struct MouseStompApp: App {
-    var body: some Scene {
-        WindowGroup { ContentView() }
-    }
+<div id="over" class="panel" hidden>
+  <h1>Game over</h1>
+  <p id="final"></p>
+  <button id="again">Play again</button>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const video = $('cam'), cv = $('c'), ctx = cv.getContext('2d');
+const hyp = Math.hypot, rnd = (a, b) => a + Math.random() * (b - a);
+const EYE = 1.3;   // assumed phone height above the floor (meters)
+const RING = 0.4;  // stomp ring radius (meters)
+
+let W, H, F, G = null, B, last = 0, aim = null;
+let haveOri = false, ang = { a: 0, b: 40, g: 0 };
+
+// ---------- Screen ----------
+function resize() {
+  const d = Math.min(devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * d; cv.height = H * d;
+  ctx.setTransform(d, 0, 0, d, 0, 0);
+  F = H * 0.77; // focal length in pixels (approximate phone camera)
+}
+addEventListener('resize', resize); resize();
+
+// ---------- Orientation -> camera basis (world: x=east, y=north, z=up) ----------
+function onOri(e) {
+  if (e.beta == null) return;
+  haveOri = true; ang.a = e.alpha || 0; ang.b = e.beta; ang.g = e.gamma || 0;
+}
+function basis() {
+  const d = Math.PI / 180, a = ang.a * d, b = ang.b * d, g = ang.g * d;
+  const sa = Math.sin(a), ca = Math.cos(a), sb = Math.sin(b), cb = Math.cos(b), sg = Math.sin(g), cg = Math.cos(g);
+  return {
+    f: [-sg * ca - cg * sb * sa, -sg * sa + cg * sb * ca, -cg * cb],  // camera forward
+    r: [cg * ca - sg * sb * sa, cg * sa + sg * sb * ca, -sg * cb],    // screen right
+    u: [-cb * sa, cb * ca, sb]                                        // screen up
+  };
+}
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function project(x, y, z) {
+  const d = [x, y, z], cz = dot(d, B.f);
+  if (cz < 0.1) return null;
+  return { x: W / 2 + dot(d, B.r) / cz * F, y: H / 2 - dot(d, B.u) / cz * F, z: cz };
+}
+const heading = () => Math.atan2(B.f[0], B.f[1]);
+
+// Where the center of the stomp ring touches the floor
+function aimPoint() {
+  const px = W / 2, py = H * 0.72, k = (px - W / 2) / F, l = -(py - H / 2) / F;
+  const d = [0, 1, 2].map(i => B.f[i] + k * B.r[i] + l * B.u[i]);
+  if (d[2] > -0.08) return null;
+  const t = -EYE / d[2], x = d[0] * t, y = d[1] * t;
+  return hyp(x, y) > 4.5 ? null : { x, y };
 }
 
-// MARK: - Game state (what the UI shows)
+// ---------- Game ----------
+function critter(th, r, speed, scale) {
+  const h = rnd(0, 6.28);
+  return { x: Math.sin(th) * r, y: Math.cos(th) * r, dx: Math.cos(h), dy: Math.sin(h),
+           speed, scale, mode: 'wander', until: 0, turn: 0 };
+}
+const setDir = (c, a) => { c.dx = Math.cos(a); c.dy = Math.sin(a); };
 
-final class GameModel: ObservableObject {
-    @Published var lives = 3
-    @Published var score = 0
-    @Published var isGameOver = false
-    @Published var isPlaying = false
-    @Published var status = "Looking for the floor... point the camera at the floor and move slowly"
-    @Published var toast: String?
+function spawnMouse(first) {
+  const lv = G.level, th = first ? heading() + rnd(-0.8, 0.8) : rnd(0, 6.28);
+  const m = critter(th, rnd(1.6, 2.6), Math.min(0.5 + 0.09 * lv, 1.2), Math.min(1.2 + 0.45 * lv, 4));
+  m.until = G.t + 1.5; G.mouse = m;
+}
+function spawnMinion(first) {
+  G.minions.push(critter(first ? heading() + rnd(-1, 1) : rnd(0, 6.28), rnd(1.6, 3), 0.3, 1.2));
+}
+function reset() {
+  G = { t: 0, lives: 3, score: 0, level: 0, inv: 0, over: false, mouse: null,
+        minions: [], fx: [], hurt: 0, ring: 0, toastT: 0 };
+  spawnMouse(true); spawnMinion(true); spawnMinion(false);
+  $('over').hidden = true; $('stomp').hidden = false; hud();
+}
+function hud() {
+  $('lives').textContent = '❤️'.repeat(G.lives) + '🖤'.repeat(3 - G.lives);
+  $('score').textContent = '🐭 ' + G.score;
+}
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('on');
+  clearTimeout(toast.id); toast.id = setTimeout(() => t.classList.remove('on'), 2000);
+}
+const buzz = p => navigator.vibrate && navigator.vibrate(p);
+
+function loseLife(msg) {
+  G.inv = G.t + 1.5; G.lives--; G.hurt = 0.45; hud(); toast(msg); buzz([200]);
+  if (G.lives <= 0) {
+    G.over = true; $('stomp').hidden = true;
+    $('final').textContent = 'You stomped ' + G.score + (G.score === 1 ? ' mouse.' : ' mice.');
+    $('over').hidden = false;
+  }
 }
 
-// MARK: - Helpers
-
-func randomDir() -> SIMD3<Float> {
-    let a = Float.random(in: 0..<(2 * .pi))
-    return SIMD3<Float>(cos(a), 0, sin(a))
+function stepMouse(m, dt) {
+  const dist = hyp(m.x, m.y), nx = -m.x / (dist || 1), ny = -m.y / (dist || 1);
+  if (G.t > m.until) {
+    if (m.mode === 'wander') {
+      if (Math.random() < 0.5) { m.mode = 'dash'; m.until = G.t + rnd(0.8, 1.6); }
+      else m.until = G.t + rnd(1, 2);
+    } else { m.mode = 'wander'; m.until = G.t + rnd(1, 2.5); setDir(m, rnd(0, 6.28)); }
+  }
+  let sp = m.speed;
+  if (m.mode === 'wander') {
+    if (G.t > m.turn) { setDir(m, Math.atan2(m.dy, m.dx) + rnd(-1, 1)); m.turn = G.t + rnd(0.4, 0.9); }
+    if (dist > 3.5) { m.dx = nx; m.dy = ny; }
+  } else if (m.mode === 'dash') { m.dx = nx; m.dy = ny; sp *= 1.7; }
+  else { m.dx = -nx; m.dy = -ny; sp *= 1.3; }
+  m.x += m.dx * sp * dt; m.y += m.dy * sp * dt;
+  if (dist < 0.45 + 0.08 * m.scale && G.t > G.inv && m.mode !== 'flee') {
+    m.mode = 'flee'; m.until = G.t + 2; loseLife('The mouse bit your leg!');
+  }
+}
+function stepMinion(c, dt) {
+  const dist = hyp(c.x, c.y);
+  if (G.t > c.turn) { setDir(c, rnd(0, 6.28)); c.turn = G.t + rnd(1.5, 3); }
+  if (dist > 3.2) { c.dx = -c.x / dist; c.dy = -c.y / dist; }
+  c.x += c.dx * c.speed * dt; c.y += c.dy * c.speed * dt;
 }
 
-func rotateY(_ v: SIMD3<Float>, by a: Float) -> SIMD3<Float> {
-    SIMD3<Float>(v.x * cos(a) - v.z * sin(a), 0, v.x * sin(a) + v.z * cos(a))
+function stomp() {
+  if (!G || G.over || !aim) return;
+  buzz(40); G.ring = 0.15;
+  const g = G, m = G.mouse;
+  if (m && hyp(m.x - aim.x, m.y - aim.y) < RING + 0.06 * m.scale) {
+    G.fx.push({ k: 'm', x: m.x, y: m.y, sc: m.scale, t: 0, flip: m.dx * B.r[0] + m.dy * B.r[1] < 0 ? -1 : 1 });
+    G.mouse = null; G.level++; G.score++; hud();
+    setTimeout(() => { if (G === g && !g.over && !g.mouse) spawnMouse(false); }, 500);
+  }
+  for (const c of [...G.minions]) {
+    if (hyp(c.x - aim.x, c.y - aim.y) < RING) {
+      G.minions = G.minions.filter(o => o !== c);
+      G.fx.push({ k: 'b', x: c.x, y: c.y, sc: c.scale, t: 0, flip: 1 });
+      loseLife('You stomped the yellow buddy!');
+      setTimeout(() => { if (G === g && !g.over && g.minions.length < 2) spawnMinion(false); }, 3000);
+    }
+  }
 }
 
-// MARK: - A creature in the game (mouse or yellow buddy)
-
-final class Critter {
-    enum Mode { case wander, dash, flee }
-
-    let entity: Entity
-    var pos: SIMD3<Float>
-    var dir: SIMD3<Float>
-    var speed: Float
-    var scale: Float
-    var mode: Mode = .wander
-    var modeUntil: Double = 0
-    var nextTurn: Double = 0
-
-    init(entity: Entity, pos: SIMD3<Float>, speed: Float, scale: Float) {
-        self.entity = entity
-        self.pos = pos
-        self.speed = speed
-        self.scale = scale
-        self.dir = randomDir()
-    }
+function update(dt) {
+  G.t += dt;
+  if (G.mouse) stepMouse(G.mouse, dt);
+  G.minions.forEach(c => stepMinion(c, dt));
 }
 
-// MARK: - Models (built from simple shapes, no external files)
+// ---------- Drawing ----------
+function ell(x, y, rx, ry) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 7); ctx.fill(); }
+function dot2(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
 
-private func mat(_ c: UIColor) -> SimpleMaterial {
-    SimpleMaterial(color: c, isMetallic: false)
+function drawMouse(p, sc, flip, sq, al) {
+  const s = 0.2 * sc * F / p.z, w = Math.sin(G.t * 20) * 0.05;
+  ctx.save(); ctx.globalAlpha = al; ctx.translate(p.x, p.y); ctx.scale(s * flip, s * sq);
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ell(0, 0, 0.6, 0.12);
+  ctx.fillStyle = '#6d7078'; ell(-0.25, -0.04 + w, 0.1, 0.07); ell(0.25, -0.04 - w, 0.1, 0.07);
+  ctx.strokeStyle = '#f3a0b0'; ctx.lineWidth = 0.05; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-0.5, -0.2); ctx.quadraticCurveTo(-0.85, -0.1 + w * 4, -1, -0.45); ctx.stroke();
+  ctx.fillStyle = '#8f9299'; ell(0, -0.22, 0.52, 0.22); dot2(0.5, -0.24, 0.17);
+  ctx.fillStyle = '#f3a0b0'; dot2(0.4, -0.42, 0.1); dot2(0.66, -0.22, 0.04);
+  ctx.fillStyle = '#111'; dot2(0.55, -0.29, 0.03);
+  ctx.restore();
+}
+function drawBuddy(p, sc, sq, al) {
+  const s = 0.3 * sc * F / p.z;
+  ctx.save(); ctx.globalAlpha = al; ctx.translate(p.x, p.y); ctx.scale(s, s * sq);
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ell(0, 0, 0.32, 0.07);
+  ctx.fillStyle = '#ffd21f';
+  ctx.beginPath(); ctx.arc(0, -0.75, 0.25, Math.PI, 0); ctx.lineTo(0.25, -0.25);
+  ctx.arc(0, -0.25, 0.25, 0, Math.PI); ctx.closePath(); ctx.fill();
+  ell(-0.29, -0.5, 0.07, 0.15); ell(0.29, -0.5, 0.07, 0.15);
+  ctx.fillStyle = '#2f55b5';
+  ctx.beginPath(); ctx.moveTo(-0.25, -0.42); ctx.lineTo(0.25, -0.42); ctx.lineTo(0.25, -0.25);
+  ctx.arc(0, -0.25, 0.25, 0, Math.PI); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#fff'; dot2(-0.1, -0.72, 0.09); dot2(0.1, -0.72, 0.09);
+  ctx.fillStyle = '#111'; dot2(-0.1, -0.72, 0.04); dot2(0.1, -0.72, 0.04);
+  ctx.strokeStyle = '#111'; ctx.lineWidth = 0.02; ctx.beginPath();
+  ctx.arc(0, -0.6, 0.1, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  ctx.restore();
 }
 
-private func part(_ r: Float, _ c: UIColor, _ p: SIMD3<Float>, _ s: SIMD3<Float> = [1, 1, 1]) -> ModelEntity {
-    let e = ModelEntity(mesh: .generateSphere(radius: r), materials: [mat(c)])
-    e.position = p
-    e.scale = s
-    return e
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  aim = aimPoint();
+  if (aim) {
+    ctx.beginPath(); let ok = true;
+    for (let i = 0; i <= 36; i++) {
+      const a = i / 36 * 6.2832, p = project(aim.x + Math.cos(a) * RING, aim.y + Math.sin(a) * RING, -EYE);
+      if (!p) { ok = false; break; }
+      i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y);
+    }
+    if (ok) {
+      ctx.closePath(); ctx.fillStyle = G.ring > 0 ? 'rgba(255,60,60,.5)' : 'rgba(0,220,255,.2)';
+      ctx.fill(); ctx.lineWidth = 3; ctx.strokeStyle = G.ring > 0 ? '#ff3c3c' : '#00dcff'; ctx.stroke();
+    }
+  }
+
+  const items = [];
+  if (G.mouse) items.push({ k: 'm', o: G.mouse, sq: 1, al: 1 });
+  G.minions.forEach(o => items.push({ k: 'b', o, sq: 1, al: 1 }));
+  G.fx.forEach(o => items.push({ k: o.k, o, sq: 0.15, al: 1 - o.t / 0.5, fx: true }));
+  for (const it of items) it.p = project(it.o.x, it.o.y, -EYE);
+  items.filter(i => i.p).sort((a, b) => b.p.z - a.p.z).forEach(it => {
+    if (it.k === 'm') {
+      const flip = it.fx ? it.o.flip : (it.o.dx * B.r[0] + it.o.dy * B.r[1] < 0 ? -1 : 1);
+      drawMouse(it.p, it.o.scale || it.o.sc, flip, it.sq, it.al);
+    } else drawBuddy(it.p, it.o.scale || it.o.sc, it.sq, it.al);
+  });
+
+  // Hint arrow when the mouse is off screen
+  const m = G.mouse;
+  if (m && !G.over) {
+    const p = project(m.x, m.y, -EYE);
+    if (!p || p.x < 0 || p.x > W || p.y < 0 || p.y > H * 1.1) {
+      const d = Math.atan2(Math.sin(Math.atan2(m.x, m.y) - heading()), Math.cos(Math.atan2(m.x, m.y) - heading()));
+      ctx.font = '700 40px system-ui,sans-serif'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#fff'; ctx.shadowColor = '#000'; ctx.shadowBlur = 8;
+      if (d > 0) { ctx.textAlign = 'right'; ctx.fillText('🐭 ▶', W - 12, H * 0.45); }
+      else { ctx.textAlign = 'left'; ctx.fillText('◀ 🐭', 12, H * 0.45); }
+      ctx.shadowBlur = 0;
+    }
+  }
+  if (G.hurt > 0) { ctx.fillStyle = 'rgba(229,50,45,' + G.hurt + ')'; ctx.fillRect(0, 0, W, H); }
 }
 
-/// A mouse. It faces the positive Z axis.
-func makeMouse() -> Entity {
-    let root = Entity()
-    let gray = UIColor(white: 0.45, alpha: 1)
-    let pink = UIColor(red: 1, green: 0.62, blue: 0.7, alpha: 1)
-
-    root.addChild(part(0.04, gray, [0, 0.03, 0], [1, 0.8, 1.8]))              // body
-    root.addChild(part(0.028, gray, [0, 0.035, 0.085], [1, 1, 1.2]))          // head
-    root.addChild(part(0.008, pink, [0, 0.033, 0.118]))                       // nose
-    for x: Float in [-0.014, 0.014] {
-        root.addChild(part(0.006, .black, [x, 0.045, 0.1]))                   // eyes
-        root.addChild(part(0.02, pink, [x * 1.5, 0.065, 0.075], [1, 1, 0.3])) // ears
-    }
-    root.addChild(part(0.01, pink, [0, 0.015, -0.15], [1, 1, 8]))             // tail
-    return root
+function frame(ts) {
+  const dt = Math.min((ts - last) / 1000 || 0, 0.05); last = ts;
+  B = basis();
+  if (!G.over) update(dt);
+  G.fx.forEach(f => f.t += dt); G.fx = G.fx.filter(f => f.t < 0.5);
+  G.hurt = Math.max(0, G.hurt - dt * 0.6); G.ring = Math.max(0, G.ring - dt);
+  draw();
+  requestAnimationFrame(frame);
 }
 
-/// A generic yellow capsule buddy (you can swap it for your own USDZ model).
-func makeBuddy() -> Entity {
-    let root = Entity()
-    let yellow = UIColor(red: 1, green: 0.85, blue: 0.1, alpha: 1)
-    let blue = UIColor(red: 0.15, green: 0.3, blue: 0.7, alpha: 1)
-
-    root.addChild(part(0.07, yellow, [0, 0.14, 0], [1, 2.0, 1]))              // body
-    root.addChild(part(0.072, blue, [0, 0.06, 0], [1, 0.9, 1]))               // pants
-    for x: Float in [-0.03, 0.03] {
-        root.addChild(part(0.022, .white, [x, 0.2, 0.058]))                   // eyes
-        root.addChild(part(0.01, .black, [x, 0.2, 0.076]))                    // pupils
+// ---------- Start ----------
+$('go').addEventListener('click', async () => {
+  $('start').hidden = true;
+  try {
+    if (window.DeviceOrientationEvent && DeviceOrientationEvent.requestPermission) {
+      await DeviceOrientationEvent.requestPermission();
     }
-    for x: Float in [-0.078, 0.078] {
-        root.addChild(part(0.03, yellow, [x, 0.13, 0], [0.5, 1.5, 0.5]))      // arms
+  } catch (e) {}
+  addEventListener('deviceorientation', onOri);
+  let note = '';
+  try {
+    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' } }, audio: false });
+    await video.play();
+  } catch (e) { note = 'Camera unavailable. Playing on a plain background.'; }
+  try { navigator.wakeLock && navigator.wakeLock.request('screen').catch(() => {}); } catch (e) {}
+  B = basis(); reset();
+  setTimeout(() => {
+    if (!haveOri) { // no motion sensor (desktop): drag to look around, Space to stomp
+      note = (note ? note + ' ' : '') + 'No motion sensor. Drag to look around, press Space to stomp.';
     }
-    return root
-}
+    if (note) { $('note').textContent = note; $('note').hidden = false; setTimeout(() => $('note').hidden = true, 6000); }
+  }, 1000);
+  requestAnimationFrame(frame);
+});
+$('again').addEventListener('click', () => { B = basis(); reset(); });
+$('stomp').addEventListener('pointerdown', e => { e.preventDefault(); stomp(); });
+addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); stomp(); } });
 
-// MARK: - Game controller
-
-final class GameController: NSObject, ObservableObject, ARSessionDelegate {
-    let model = GameModel()
-    let arView = ARView(frame: .zero)
-
-    private let root = AnchorEntity(world: .zero)
-    private var floorY: Float?
-    private var updateSub: Cancellable?
-    private var fallbackTimer: Timer?
-    private var started = false
-
-    private var mouse: Critter?
-    private var minions: [Critter] = []
-
-    private var marker: ModelEntity?
-    private var markerMat = UnlitMaterial(color: .cyan)
-    private var markerHitMat = UnlitMaterial(color: .red)
-
-    private var lastForward = SIMD3<Float>(0, 0, -1)
-    private var stompPoint = SIMD3<Float>.zero
-
-    private var time: Double = 0
-    private var invulnerableUntil: Double = 0
-    private var level = 0
-
-    // MARK: Start
-
-    func start() {
-        guard !started else { return }
-        started = true
-
-        let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [.horizontal]
-        arView.session.delegate = self
-        arView.session.run(config)
-        arView.scene.addAnchor(root)
-
-        updateSub = arView.scene.subscribe(to: SceneEvents.Update.self) { [weak self] ev in
-            self?.update(dt: Float(ev.deltaTime))
-        }
-
-        // If no floor is found within 8 seconds, assume the floor is 1.3 m below the phone
-        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
-            guard let self, self.floorY == nil else { return }
-            self.floorY = self.arView.cameraTransform.translation.y - 1.3
-            self.beginGame()
-        }
-    }
-
-    // MARK: Floor detection
-
-    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { handle(anchors) }
-    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { handle(anchors) }
-
-    private func handle(_ anchors: [ARAnchor]) {
-        guard !model.isPlaying else { return }
-        let camY = arView.cameraTransform.translation.y
-        for a in anchors {
-            guard let plane = a as? ARPlaneAnchor, plane.alignment == .horizontal else { continue }
-            let y = plane.transform.columns.3.y
-            // Only a surface at least 70 cm below the camera counts as floor (not a table)
-            if camY - y > 0.7 { floorY = min(floorY ?? y, y) }
-        }
-        if floorY != nil { beginGame() }
-    }
-
-    private func beginGame() {
-        guard !model.isPlaying else { return }
-        fallbackTimer?.invalidate()
-        model.isPlaying = true
-        model.status = ""
-        setupMarker()
-        resetRound()
-    }
-
-    func resetRound() {
-        mouse?.entity.removeFromParent()
-        mouse = nil
-        minions.forEach { $0.entity.removeFromParent() }
-        minions = []
-        level = 0
-        invulnerableUntil = 0
-        model.lives = 3
-        model.score = 0
-        model.isGameOver = false
-        model.toast = nil
-        spawnMouse()
-        spawnMinion()
-        spawnMinion()
-    }
-
-    // MARK: Utilities
-
-    private var playerPos: SIMD3<Float> {
-        let c = arView.cameraTransform.translation
-        return SIMD3<Float>(c.x, floorY ?? (c.y - 1.3), c.z)
-    }
-
-    private func randomSpot(minR: Float, maxR: Float) -> SIMD3<Float> {
-        let a = Float.random(in: 0..<(2 * .pi))
-        let r = Float.random(in: minR...maxR)
-        let p = playerPos
-        return SIMD3<Float>(p.x + cos(a) * r, p.y, p.z + sin(a) * r)
-    }
-
-    private func face(_ e: Entity, _ dir: SIMD3<Float>) {
-        e.orientation = simd_quatf(angle: atan2(dir.x, dir.z), axis: [0, 1, 0])
-    }
-
-    // MARK: Spawning
-
-    private func spawnMouse() {
-        // Every new mouse is bigger and faster than the last
-        let s = min(1.2 + 0.45 * Float(level), 4.0)
-        let e = makeMouse()
-        e.scale = SIMD3<Float>(repeating: s)
-        let pos = randomSpot(minR: 1.5, maxR: 2.5)
-        e.position = pos
-        root.addChild(e)
-
-        let c = Critter(entity: e, pos: pos, speed: min(0.5 + 0.09 * Float(level), 1.2), scale: s)
-        c.modeUntil = time + 1.5
-        mouse = c
-    }
-
-    private func spawnMinion() {
-        let e = makeBuddy()
-        e.scale = SIMD3<Float>(repeating: 1.2)
-        let pos = randomSpot(minR: 1.5, maxR: 3.0)
-        e.position = pos
-        root.addChild(e)
-        minions.append(Critter(entity: e, pos: pos, speed: 0.3, scale: 1.2))
-    }
-
-    // MARK: Foot marker (the circle on the floor)
-
-    private func setupMarker() {
-        markerMat.blending = .transparent(opacity: .init(floatLiteral: 0.45))
-        markerHitMat.blending = .transparent(opacity: .init(floatLiteral: 0.6))
-        let m = ModelEntity(mesh: .generateSphere(radius: 1), materials: [markerMat])
-        m.scale = [0.3, 0.004, 0.3]
-        root.addChild(m)
-        marker = m
-    }
-
-    private func updateMarker(_ player: SIMD3<Float>) {
-        let m = arView.cameraTransform.matrix
-        let f = SIMD3<Float>(-m.columns.2.x, 0, -m.columns.2.z)
-        if length(f) > 0.25 { lastForward = normalize(f) }
-        stompPoint = player + lastForward * 0.6
-        marker?.position = stompPoint + SIMD3<Float>(0, 0.004, 0)
-    }
-
-    // MARK: Game loop
-
-    private func update(dt rawDt: Float) {
-        guard model.isPlaying, !model.isGameOver, floorY != nil else { return }
-        let dt = min(rawDt, 0.05)
-        time += Double(dt)
-        let player = playerPos
-        updateMarker(player)
-        if let m = mouse { stepMouse(m, player, dt) }
-        for mi in minions { stepMinion(mi, player, dt) }
-    }
-
-    private func stepMouse(_ m: Critter, _ player: SIMD3<Float>, _ dt: Float) {
-        var to = player - m.pos
-        to.y = 0
-        let dist = length(to)
-        let toN = dist > 0.001 ? to / dist : SIMD3<Float>(0, 0, 1)
-
-        if time > m.modeUntil {
-            switch m.mode {
-            case .wander:
-                if Bool.random() {
-                    m.mode = .dash
-                    m.modeUntil = time + Double.random(in: 0.8...1.6)
-                } else {
-                    m.modeUntil = time + Double.random(in: 1.0...2.0)
-                }
-            case .dash, .flee:
-                m.mode = .wander
-                m.modeUntil = time + Double.random(in: 1.0...2.5)
-                m.dir = randomDir()
-            }
-        }
-
-        var speed = m.speed
-        switch m.mode {
-        case .wander:
-            if time > m.nextTurn {
-                m.dir = rotateY(m.dir, by: Float.random(in: -1...1))
-                m.nextTurn = time + Double.random(in: 0.4...0.9)
-            }
-            if dist > 3.5 { m.dir = toN }
-        case .dash:
-            m.dir = toN
-            speed *= 1.7
-        case .flee:
-            m.dir = -toN
-            speed *= 1.3
-        }
-
-        m.pos += m.dir * speed * dt
-        m.entity.position = m.pos
-        face(m.entity, m.dir)
-
-        // Bite
-        let biteRadius = 0.18 + 0.07 * m.scale
-        if dist < biteRadius, time > invulnerableUntil, m.mode != .flee {
-            m.mode = .flee
-            m.modeUntil = time + 2
-            loseLife("🐭 The mouse bit your leg!")
-        }
-    }
-
-    private func stepMinion(_ c: Critter, _ player: SIMD3<Float>, _ dt: Float) {
-        var to = player - c.pos
-        to.y = 0
-        let dist = length(to)
-
-        if time > c.nextTurn {
-            c.dir = rotateY(c.dir, by: Float.random(in: -1.5...1.5))
-            c.nextTurn = time + Double.random(in: 1.5...3.0)
-        }
-        if dist > 3.2, dist > 0.001 { c.dir = to / dist }
-
-        c.pos += c.dir * c.speed * dt
-        c.entity.position = c.pos
-        face(c.entity, c.dir)
-    }
-
-    // MARK: Stomping
-
-    func stomp() {
-        guard model.isPlaying, !model.isGameOver else { return }
-        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
-        flashMarker()
-
-        if let m = mouse, hit(m, radius: 0.30 + 0.06 * m.scale) {
-            killMouse(m)
-        }
-        for mi in minions where hit(mi, radius: 0.30) {
-            killMinion(mi)
-        }
-    }
-
-    private func hit(_ c: Critter, radius: Float) -> Bool {
-        let d = c.pos - stompPoint
-        return length(SIMD2<Float>(d.x, d.z)) < radius
-    }
-
-    private func flashMarker() {
-        marker?.model?.materials = [markerHitMat]
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self else { return }
-            self.marker?.model?.materials = [self.markerMat]
-        }
-    }
-
-    private func squash(_ e: Entity) {
-        var t = e.transform
-        t.scale = SIMD3<Float>(e.scale.x * 1.3, e.scale.y * 0.05, e.scale.z * 1.3)
-        e.move(to: t, relativeTo: e.parent, duration: 0.15)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { e.removeFromParent() }
-    }
-
-    private func killMouse(_ m: Critter) {
-        mouse = nil
-        squash(m.entity)
-        level += 1
-        model.score += 1
-        UINotificationFeedbackGenerator().notificationOccurred(.success)
-
-        // After you kill a mouse, a bigger one shows up
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self, self.model.isPlaying, !self.model.isGameOver, self.mouse == nil else { return }
-            self.spawnMouse()
-        }
-    }
-
-    private func killMinion(_ c: Critter) {
-        minions.removeAll { $0 === c }
-        squash(c.entity)
-        loseLife("😢 You stomped the yellow buddy!")
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, self.model.isPlaying, !self.model.isGameOver, self.minions.count < 2 else { return }
-            self.spawnMinion()
-        }
-    }
-
-    // MARK: Lives
-
-    private func loseLife(_ why: String) {
-        invulnerableUntil = time + 1.5
-        model.lives = max(0, model.lives - 1)
-        UINotificationFeedbackGenerator().notificationOccurred(.error)
-        showToast(why)
-        if model.lives == 0 { model.isGameOver = true }
-    }
-
-    private func showToast(_ text: String) {
-        model.toast = text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            if self?.model.toast == text { self?.model.toast = nil }
-        }
-    }
-}
-
-// MARK: - UI
-
-struct ARViewContainer: UIViewRepresentable {
-    let arView: ARView
-    func makeUIView(context: Context) -> ARView { arView }
-    func updateUIView(_ uiView: ARView, context: Context) {}
-}
-
-struct ContentView: View {
-    @StateObject private var game = GameController()
-
-    var body: some View {
-        ZStack {
-            ARViewContainer(arView: game.arView).ignoresSafeArea()
-            HUDView(model: game.model, onStomp: game.stomp, onRestart: game.resetRound)
-        }
-        .onAppear { game.start() }
-    }
-}
-
-struct HUDView: View {
-    @ObservedObject var model: GameModel
-    var onStomp: () -> Void
-    var onRestart: () -> Void
-
-    var body: some View {
-        ZStack {
-            VStack {
-                HStack {
-                    Text(String(repeating: "❤️", count: max(0, model.lives)) +
-                         String(repeating: "🖤", count: max(0, 3 - model.lives)))
-                        .font(.largeTitle)
-                    Spacer()
-                    Text("🐭 \(model.score)")
-                        .font(.largeTitle.bold())
-                        .foregroundStyle(.white)
-                }
-                .padding()
-                .background(.black.opacity(0.35))
-
-                if let t = model.toast {
-                    Text(t)
-                        .font(.title3.bold())
-                        .padding(12)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                }
-
-                Spacer()
-
-                if !model.status.isEmpty {
-                    Text(model.status)
-                        .multilineTextAlignment(.center)
-                        .font(.headline)
-                        .padding(14)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                        .padding()
-                }
-
-                if model.isPlaying && !model.isGameOver {
-                    Button(action: onStomp) {
-                        Text("👣 STOMP!")
-                            .font(.system(size: 34, weight: .heavy))
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 22)
-                            .background(Color.red, in: RoundedRectangle(cornerRadius: 24))
-                            .padding(.horizontal, 30)
-                    }
-                    .padding(.bottom, 20)
-                }
-            }
-
-            if model.isGameOver {
-                VStack(spacing: 18) {
-                    Text("GAME OVER").font(.system(size: 44, weight: .black))
-                    Text("You stomped \(model.score) mice").font(.title)
-                    Button("Play again", action: onRestart)
-                        .font(.title2.bold())
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.large)
-                }
-                .foregroundStyle(.white)
-                .padding(40)
-                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 24))
-            }
-        }
-    }
-}
+// Drag-to-look fallback when there is no motion sensor
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; });
+addEventListener('pointerup', () => drag = null);
+addEventListener('pointermove', e => {
+  if (!drag || haveOri) return;
+  ang.a -= (e.clientX - drag.x) * 0.3;
+  ang.b = Math.max(0, Math.min(120, ang.b + (e.clientY - drag.y) * 0.3));
+  drag = { x: e.clientX, y: e.clientY };
+});
+</script>
+</body>
+</html>
