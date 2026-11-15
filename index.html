@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-<title>Mouse Stomp: 30 Seconds</title>
+<title>Mouse Kick: 30 Seconds</title>
 <style>
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   [hidden]{display:none!important}
@@ -53,9 +53,9 @@
 </div>
 
 <div id="start" class="panel">
-  <h1>Mouse Stomp</h1>
-  <p>Squash as many mice as you can in 30 seconds. No lives, no penalties.</p>
-  <p>Put your phone on a stand or lean it against something, aimed at the floor, and don't move it. Before every game the camera scans your foot and learns how you stomp.</p>
+  <h1>Mouse Kick</h1>
+  <p>Kick as many mice as you can in 30 seconds. No lives, no penalties.</p>
+  <p>Put your phone on a stand or lean it against something, aimed at the floor, and don't move it. Before every game the camera scans your foot and learns how you kick.</p>
   <p>Which foot will you play with?</p>
   <div class="seg"><button id="sideL">Left</button><button id="sideR" class="on">Right</button></div>
   <button id="go" class="main">START</button>
@@ -75,6 +75,7 @@ const $ = id => document.getElementById(id);
 const video = $('cam'), cv = $('c'), ctx = cv.getContext('2d');
 const hyp = Math.hypot, rnd = (a, b) => a + Math.random() * (b - a), sleep = ms => new Promise(r => setTimeout(r, ms));
 const GAME_SECS = 30;
+const MOUSE_SCALE = 0.55; // mice are small and always the same size
 
 // Analysis grid: every camera frame is shrunk to GW x GH to find the foot quickly.
 const GW = 128, GH = 96, N = GW * GH, THR = 32;
@@ -87,7 +88,7 @@ const mimg = mctx.createImageData(GW, GH), mask = new Uint8Array(N);
 let W, H, vw = 640, vh = 480, vm = { s: 1, ox: 0, oy: 0 }, BX0, BX1, BY0, BY1;
 let bg = null;                          // scanned empty floor
 let foot = null;                        // scanned foot: { mean:[r,g,b], tol, len }
-let stompCal = { thr: 0.3, hold: 3 };   // learned from the practice stomp
+let kickCal = { thr: 0.2, speed: 1.5 };  // learned from the practice kick
 let side = 'right';                     // which foot is playing
 let mode = 'idle';                      // idle | floor | foot | show | stomp | ready | play
 let busy = false, banner = null, G = null, PR = null, last = 0, lastVT = -1, looping = false;
@@ -192,8 +193,23 @@ function detect() {
     mask.fill(0);
     if (performance.now() > movedToast) { toast('The camera moved. Keep the phone still.'); movedToast = performance.now() + 4000; }
   }
-  paintMask();
+  trackFoot();
   return true;
+}
+
+// Follows the middle of the foot shape to measure how fast the foot moves (in foot-lengths per second).
+const fhist = []; let footV = { sp: 0, dx: 0, dy: 0 };
+function trackFoot() {
+  let sx = 0, sy = 0, n = 0;
+  for (let i = 0; i < N; i++) if (mask[i]) { sx += i % GW; sy += (i / GW) | 0; n++; }
+  const now = performance.now();
+  if (n < 8) { fhist.length = 0; footV = { sp: 0, dx: 0, dy: 0 }; return; }
+  const c = { x: (sx / n + 0.5) / GW * vw * vm.s - vm.ox, y: (sy / n + 0.5) / GH * vh * vm.s - vm.oy, t: now };
+  fhist.push(c); if (fhist.length > 4) fhist.shift();
+  const a = fhist[0], dt = (now - a.t) / 1000;
+  if (fhist.length < 2 || dt <= 0) { footV = { sp: 0, dx: 0, dy: 0 }; return; }
+  const vx = (c.x - a.x) / dt, vy = (c.y - a.y) / dt, v = hyp(vx, vy);
+  footV = { sp: v / foot.len, dx: vx / (v || 1), dy: vy / (v || 1) };
 }
 
 function overlap(cx, cy, R) { // share of the circle (screen px) covered by foot pixels
@@ -212,7 +228,7 @@ function overlap(cx, cy, R) { // share of the circle (screen px) covered by foot
 const persp = y => 0.75 + 0.5 * (y / H);
 function geom(c) { // size and hit circle, scaled to the scanned foot
   const u = foot.len * 0.3 * c.scale * persp(c.y);
-  return { u, cx: c.x, cy: c.y - u * 0.22, r: Math.max(foot.len * 0.12, Math.min(u * 0.55, foot.len * 0.45)) };
+  return { u, cx: c.x, cy: c.y - u * 0.22, r: Math.max(foot.len * 0.14, Math.min(u * 0.55, foot.len * 0.45)) };
 }
 function newMouse(scale, speed) { // enters the picture from the left, right or top
   const sd = Math.floor(Math.random() * 3); let x, y;
@@ -253,7 +269,7 @@ function endGame() {
   G.over = true;
   const isBest = G.score > best;
   if (isBest) { best = G.score; try { localStorage.setItem('mouseStompBest', best); } catch (e) {} }
-  $('final').textContent = 'You squashed ' + G.score + (G.score === 1 ? ' mouse.' : ' mice.');
+  $('final').textContent = 'You kicked ' + G.score + (G.score === 1 ? ' mouse.' : ' mice.');
   $('bestP').textContent = isBest ? 'New best score!' : 'Best score: ' + best;
   $('top').hidden = true; $('bar').hidden = true; $('over').hidden = false; buzz([100, 60, 100]);
 }
@@ -262,53 +278,57 @@ function updateGame(dt) {
   const left = GAME_SECS - G.t;
   if (left <= 0) { endGame(); return; }
   $('time').textContent = '⏱ ' + Math.ceil(left); $('barf').style.width = (left / GAME_SECS * 100) + '%';
-  const target = 2 + Math.floor(G.t / 8); // more mice at once as time passes
+  const target = 3 + Math.floor(G.t / 8); // more mice at once as time passes
   if (G.mice.length < target && G.t >= G.nextSpawn) {
-    G.mice.push(newMouse(rnd(1, 2.3), rnd(0.12, 0.2) + G.t * 0.002)); G.nextSpawn = G.t + 0.4;
+    G.mice.push(newMouse(MOUSE_SCALE, rnd(0.12, 0.2))); G.nextSpawn = G.t + 0.4;
   }
   G.mice.forEach(c => step(c, dt));
 }
-function crush(c) {
+function kick(c) { // the mouse flies away in the direction the foot was moving
   const q = geom(c);
-  G.fx.push({ x: c.x, y: c.y, u: q.u, flip: c.dx < 0 ? -1 : 1, t: 0 });
+  G.fx.push({ x: c.x, y: c.y, u: q.u, dx: footV.dx, dy: footV.dy, t: 0, spin: (Math.random() < 0.5 ? -1 : 1) * rnd(8, 14) });
   G.pops.push({ x: c.x, y: c.y - q.u, t: 0 });
   G.mice = G.mice.filter(o => o !== c); G.score++; $('score').textContent = '🐭 ' + G.score; buzz(40);
 }
-function checkHits() {
-  if (camMoved) return;
+function checkHits() { // a kick = the foot is touching the mouse AND moving fast
+  if (camMoved || footV.sp < kickCal.speed) return;
   for (const c of [...G.mice]) {
+    if (G.t - c.born < 0.4) continue;
     const q = geom(c);
-    c.hold = overlap(q.cx, q.cy, q.r) > stompCal.thr ? c.hold + 1 : 0;   // foot must stay on it for a moment
-    if (c.hold >= stompCal.hold && G.t - c.born > 0.5) crush(c);
+    if (overlap(q.cx, q.cy, q.r) > kickCal.thr) kick(c);
   }
 }
 
-// ---------- Practice stomp: learns how this person's stomp looks to the camera ----------
+// ---------- Practice kick: learns how this person's kick looks to the camera ----------
 function practiceTick() {
   if (!PR || PR.done) return;
   const q = geom(PR), ov = overlap(q.cx, q.cy, q.r), now = performance.now();
-  if (!PR.t0 && ov > 0.15 && !camMoved) { PR.t0 = now; PR.vals = []; }
+  if (footV.sp > 0.3) PR.dir = { dx: footV.dx, dy: footV.dy };
+  if (!PR.t0 && ov > 0.1 && !camMoved) { PR.t0 = now; PR.vals = []; }
   if (PR.t0) {
-    PR.vals.push(ov);
-    if (now - PR.t0 > 1300) finishPractice();
+    PR.vals.push({ ov, sp: footV.sp });
+    if (now - PR.t0 > 1000) finishPractice();
   }
 }
 async function finishPractice() {
+  const vals = PR.vals, peakOv = Math.max(...vals.map(v => v.ov));
+  const thr = Math.min(0.4, Math.max(0.1, peakOv * 0.5));
+  const sps = vals.filter(v => v.ov > thr).map(v => v.sp), maxSp = sps.length ? Math.max(...sps) : 0;
+  if (maxSp < 0.5) { toast('Too slow. Kick the mouse faster.'); PR.t0 = 0; return; }
   PR.done = true;
-  const peak = Math.max(...PR.vals), thr = Math.min(0.5, Math.max(0.2, peak * 0.5));
-  let run = 0, dwell = 0;
-  for (const v of PR.vals) { run = v > thr ? run + 1 : 0; dwell = Math.max(dwell, run); }
-  stompCal = { thr, hold: Math.min(4, Math.max(2, Math.floor(dwell * 0.6))) };
-  toast('Got it. I know how you stomp.');
+  kickCal = { thr, speed: Math.min(4, Math.max(0.6, maxSp * 0.4)) };
+  const d = PR.dir || { dx: 1, dy: 0 };
+  PR.fly = { t0: performance.now(), dx: d.dx, dy: d.dy, spin: 10 };
+  toast('Got it. I know how you kick.');
   await sleep(1200); $('cal').hidden = true; PR = null; countdownThenPlay();
 }
 
 // ---------- Drawing ----------
 function ell(x, y, rx, ry) { ctx.beginPath(); ctx.ellipse(x, y, rx, ry, 0, 0, 7); ctx.fill(); }
 function dot(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.fill(); }
-function drawMouse(x, y, u, flip, sq, al) {
+function drawMouse(x, y, u, flip, sq, al, rot = 0) {
   const w = Math.sin(performance.now() / 50) * 0.05;
-  ctx.save(); ctx.globalAlpha = al; ctx.translate(x, y); ctx.scale(u * flip, u * sq);
+  ctx.save(); ctx.globalAlpha = al; ctx.translate(x, y); ctx.rotate(rot); ctx.scale(u * flip, u * sq);
   ctx.fillStyle = 'rgba(0,0,0,.3)'; ell(0, 0, 0.6, 0.12);
   ctx.fillStyle = '#6d7078'; ell(-0.25, -0.04 + w, 0.1, 0.07); ell(0.25, -0.04 - w, 0.1, 0.07);
   ctx.strokeStyle = '#f3a0b0'; ctx.lineWidth = 0.05; ctx.lineCap = 'round';
@@ -324,15 +344,21 @@ function draw() {
     ctx.setLineDash([14, 10]); ctx.lineWidth = 4; ctx.strokeStyle = '#00dcff';
     ctx.beginPath(); ctx.ellipse(W / 2, H * 0.5, W * 0.15, H * 0.17, side === 'left' ? -0.2 : 0.2, 0, 7); ctx.stroke(); ctx.setLineDash([]);
   }
-  if (['show', 'stomp', 'ready', 'play'].includes(mode)) ctx.drawImage(maskCv, -vm.ox, -vm.oy, vw * vm.s, vh * vm.s); // what the game sees as foot
-  if (mode === 'stomp' && PR && !PR.done) {
-    const q = geom(PR); drawMouse(PR.x, PR.y, q.u, 1, 1, 1);
-    ctx.font = '800 22px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
-    ctx.shadowColor = '#000'; ctx.shadowBlur = 8; ctx.fillText('Stomp me!', PR.x, PR.y - q.u * 0.9); ctx.shadowBlur = 0;
+  if (mode === 'show') ctx.drawImage(maskCv, -vm.ox, -vm.oy, vw * vm.s, vh * vm.s); // shown only to confirm the foot scan
+  if (mode === 'stomp' && PR) {
+    const q = geom(PR);
+    if (!PR.done) {
+      drawMouse(PR.x, PR.y, q.u, 1, 1, 1);
+      ctx.font = '800 22px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.fillStyle = '#fff';
+      ctx.shadowColor = '#000'; ctx.shadowBlur = 8; ctx.fillText('Kick me!', PR.x, PR.y - q.u * 1.2); ctx.shadowBlur = 0;
+    } else if (PR.fly) {
+      const t = (performance.now() - PR.fly.t0) / 1000;
+      if (t < 0.7) drawMouse(PR.x + PR.fly.dx * t * W * 1.2, PR.y + PR.fly.dy * t * W * 1.2 - Math.sin(t * 4.5) * H * 0.05, q.u, PR.fly.dx < 0 ? -1 : 1, 1, 1 - t / 0.7, PR.fly.spin * t);
+    }
   }
   if (mode === 'play' && G) {
     for (const c of [...G.mice].sort((a, b) => a.y - b.y)) drawMouse(c.x, c.y, geom(c).u, c.dx < 0 ? -1 : 1, 1, 1);
-    for (const f of G.fx) drawMouse(f.x, f.y, f.u, f.flip, 0.15, 1 - f.t / 0.5);
+    for (const f of G.fx) drawMouse(f.x + f.dx * f.t * W * 1.2, f.y + f.dy * f.t * W * 1.2 - Math.sin(f.t * 4.5) * H * 0.05, f.u, f.dx < 0 ? -1 : 1, 1, 1 - f.t / 0.7, f.spin * f.t);
     ctx.font = '900 34px system-ui,sans-serif'; ctx.textAlign = 'center'; ctx.shadowColor = '#000'; ctx.shadowBlur = 6;
     for (const p of G.pops) { ctx.globalAlpha = 1 - p.t / 0.8; ctx.fillStyle = '#ffd21f'; ctx.fillText('+1', p.x, p.y - p.t * 70); }
     ctx.globalAlpha = 1; ctx.shadowBlur = 0;
@@ -351,7 +377,7 @@ function frame(ts) {
     if (mode === 'stomp' && fresh) practiceTick();
     if (mode === 'play' && G) {
       if (!G.over) { updateGame(dt); if (fresh && !G.over) checkHits(); }
-      G.fx.forEach(f => f.t += dt); G.fx = G.fx.filter(f => f.t < 0.5);
+      G.fx.forEach(f => f.t += dt); G.fx = G.fx.filter(f => f.t < 0.7);
       G.pops.forEach(p => p.t += dt); G.pops = G.pops.filter(p => p.t < 0.8);
     }
   }
@@ -374,8 +400,8 @@ function footStep() {
   sheet('Step 2 of 3: scan your ' + side + ' foot', 'Press the button, then put your ' + side + ' foot flat inside the outline and keep still for 3 seconds.', 'Scan my foot', 'Redo floor');
 }
 function stompStep() {
-  mode = 'stomp'; PR = { x: W / 2, y: H * 0.6, dx: 1, dy: 0, scale: 1.9, t0: 0, done: false };
-  sheet('Step 3 of 3: show how you stomp', 'Step on the mouse in the middle with your ' + side + ' foot, the way you will in the game.', null, 'Skip');
+  mode = 'stomp'; PR = { x: W / 2, y: H * 0.6, dx: 1, dy: 0, scale: MOUSE_SCALE, t0: 0, done: false };
+  sheet('Step 3 of 3: show how you kick', 'Kick the mouse in the middle with your ' + side + ' foot, the way you will in the game.', null, 'Skip');
 }
 async function countdown() {
   for (let i = 3; i > 0; i--) { banner = String(i); await sleep(800); }
@@ -405,7 +431,7 @@ $('calB').addEventListener('click', async () => {
 });
 $('calB2').addEventListener('click', () => {
   if (busy) return;
-  if (mode === 'stomp') { stompCal = { thr: 0.3, hold: 3 }; PR = null; countdownThenPlay(); }
+  if (mode === 'stomp') { kickCal = { thr: 0.2, speed: 1.5 }; PR = null; countdownThenPlay(); }
   else floorStep();
 });
 
