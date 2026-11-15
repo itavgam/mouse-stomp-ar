@@ -1,0 +1,512 @@
+//
+//  MouseStomp.swift
+//  משחק AR: דורכים על עכברים, לא דורכים על הדמות הצהובה.
+//
+//  שימוש: ב-Xcode צור פרויקט iOS App (SwiftUI), מחק את קובץ ה-App וה-ContentView
+//  שנוצרו אוטומטית, והדבק את הקובץ הזה במקומם.
+//  חובה: להוסיף ב-Info את המפתח "Privacy - Camera Usage Description".
+//
+
+import SwiftUI
+import RealityKit
+import ARKit
+
+// MARK: - App
+
+@main
+struct MouseStompApp: App {
+    var body: some Scene {
+        WindowGroup { ContentView() }
+    }
+}
+
+// MARK: - מצב המשחק (מה שמוצג על המסך)
+
+final class GameModel: ObservableObject {
+    @Published var lives = 3
+    @Published var score = 0
+    @Published var isGameOver = false
+    @Published var isPlaying = false
+    @Published var status = "מחפש רצפה… כוון את המצלמה לרצפה והזז את הפלאפון לאט"
+    @Published var toast: String?
+}
+
+// MARK: - יצור במשחק (עכבר או דמות צהובה)
+
+func randomDir() -> SIMD3<Float> {
+    let a = Float.random(in: 0..<(2 * .pi))
+    return SIMD3<Float>(cos(a), 0, sin(a))
+}
+
+func rotateY(_ v: SIMD3<Float>, by a: Float) -> SIMD3<Float> {
+    SIMD3<Float>(v.x * cos(a) - v.z * sin(a), 0, v.x * sin(a) + v.z * cos(a))
+}
+
+final class Critter {
+    enum Mode { case wander, dash, flee }
+
+    let entity: Entity
+    var pos: SIMD3<Float>
+    var dir: SIMD3<Float>
+    var speed: Float
+    var scale: Float
+    var mode: Mode = .wander
+    var modeUntil: Double = 0
+    var nextTurn: Double = 0
+
+    init(entity: Entity, pos: SIMD3<Float>, speed: Float, scale: Float) {
+        self.entity = entity
+        self.pos = pos
+        self.speed = speed
+        self.scale = scale
+        self.dir = randomDir()
+    }
+}
+
+// MARK: - בניית המודלים (מצורות פשוטות, בלי קבצים חיצוניים)
+
+private func mat(_ c: UIColor) -> SimpleMaterial {
+    SimpleMaterial(color: c, isMetallic: false)
+}
+
+private func part(_ r: Float, _ c: UIColor, _ p: SIMD3<Float>, _ s: SIMD3<Float> = [1, 1, 1]) -> ModelEntity {
+    let e = ModelEntity(mesh: .generateSphere(radius: r), materials: [mat(c)])
+    e.position = p
+    e.scale = s
+    return e
+}
+
+/// עכבר. הפנים שלו הן לכיוון ציר Z החיובי.
+func makeMouse() -> Entity {
+    let root = Entity()
+    let gray = UIColor(white: 0.45, alpha: 1)
+    let pink = UIColor(red: 1, green: 0.62, blue: 0.7, alpha: 1)
+
+    root.addChild(part(0.04, gray, [0, 0.03, 0], [1, 0.8, 1.8]))            // גוף
+    root.addChild(part(0.028, gray, [0, 0.035, 0.085], [1, 1, 1.2]))        // ראש
+    root.addChild(part(0.008, pink, [0, 0.033, 0.118]))                     // אף
+    for x: Float in [-0.014, 0.014] {
+        root.addChild(part(0.006, .black, [x, 0.045, 0.1]))                 // עיניים
+        root.addChild(part(0.02, pink, [x * 1.5, 0.065, 0.075], [1, 1, 0.3])) // אוזניים
+    }
+    root.addChild(part(0.01, pink, [0, 0.015, -0.15], [1, 1, 8]))           // זנב
+    return root
+}
+
+/// דמות צהובה "קפסולה" גנרית (אפשר להחליף בקובץ USDZ משלך, ראה הערה בהסבר).
+func makeBuddy() -> Entity {
+    let root = Entity()
+    let yellow = UIColor(red: 1, green: 0.85, blue: 0.1, alpha: 1)
+    let blue = UIColor(red: 0.15, green: 0.3, blue: 0.7, alpha: 1)
+
+    root.addChild(part(0.07, yellow, [0, 0.14, 0], [1, 2.0, 1]))            // גוף
+    root.addChild(part(0.072, blue, [0, 0.06, 0], [1, 0.9, 1]))             // מכנסיים
+    for x: Float in [-0.03, 0.03] {
+        root.addChild(part(0.022, .white, [x, 0.2, 0.058]))                 // עיניים
+        root.addChild(part(0.01, .black, [x, 0.2, 0.076]))                  // אישונים
+    }
+    for x: Float in [-0.078, 0.078] {
+        root.addChild(part(0.03, yellow, [x, 0.13, 0], [0.5, 1.5, 0.5]))    // ידיים
+    }
+    return root
+}
+
+// MARK: - בקר המשחק
+
+final class GameController: NSObject, ObservableObject, ARSessionDelegate {
+    let model = GameModel()
+    let arView = ARView(frame: .zero)
+
+    private let root = AnchorEntity(world: .zero)
+    private var floorY: Float?
+    private var updateSub: Cancellable?
+    private var fallbackTimer: Timer?
+    private var started = false
+
+    private var mouse: Critter?
+    private var minions: [Critter] = []
+
+    private var marker: ModelEntity?
+    private var markerMat = UnlitMaterial(color: .cyan)
+    private var markerHitMat = UnlitMaterial(color: .red)
+
+    private var lastForward = SIMD3<Float>(0, 0, -1)
+    private var stompPoint = SIMD3<Float>.zero
+
+    private var time: Double = 0
+    private var invulnerableUntil: Double = 0
+    private var level = 0
+
+    // MARK: התחלה
+
+    func start() {
+        guard !started else { return }
+        started = true
+
+        let config = ARWorldTrackingConfiguration()
+        config.planeDetection = [.horizontal]
+        arView.session.delegate = self
+        arView.session.run(config)
+        arView.scene.addAnchor(root)
+
+        updateSub = arView.scene.subscribe(to: SceneEvents.Update.self) { [weak self] ev in
+            self?.update(dt: Float(ev.deltaTime))
+        }
+
+        // אם לא נמצאה רצפה תוך 8 שניות, מניחים שהרצפה כ-1.3 מטר מתחת לפלאפון
+        fallbackTimer = Timer.scheduledTimer(withTimeInterval: 8, repeats: false) { [weak self] _ in
+            guard let self, self.floorY == nil else { return }
+            self.floorY = self.arView.cameraTransform.translation.y - 1.3
+            self.beginGame()
+        }
+    }
+
+    // MARK: זיהוי רצפה
+
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { handle(anchors) }
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { handle(anchors) }
+
+    private func handle(_ anchors: [ARAnchor]) {
+        guard !model.isPlaying else { return }
+        let camY = arView.cameraTransform.translation.y
+        for a in anchors {
+            guard let plane = a as? ARPlaneAnchor, plane.alignment == .horizontal else { continue }
+            let y = plane.transform.columns.3.y
+            // רק משטח שנמצא לפחות 70 ס"מ מתחת למצלמה נחשב רצפה (ולא שולחן)
+            if camY - y > 0.7 { floorY = min(floorY ?? y, y) }
+        }
+        if floorY != nil { beginGame() }
+    }
+
+    private func beginGame() {
+        guard !model.isPlaying else { return }
+        fallbackTimer?.invalidate()
+        model.isPlaying = true
+        model.status = ""
+        setupMarker()
+        resetRound()
+    }
+
+    func resetRound() {
+        mouse?.entity.removeFromParent()
+        mouse = nil
+        minions.forEach { $0.entity.removeFromParent() }
+        minions = []
+        level = 0
+        invulnerableUntil = 0
+        model.lives = 3
+        model.score = 0
+        model.isGameOver = false
+        model.toast = nil
+        spawnMouse()
+        spawnMinion()
+        spawnMinion()
+    }
+
+    // MARK: עזרים
+
+    private var playerPos: SIMD3<Float> {
+        let c = arView.cameraTransform.translation
+        return SIMD3<Float>(c.x, floorY ?? (c.y - 1.3), c.z)
+    }
+
+    private func randomSpot(minR: Float, maxR: Float) -> SIMD3<Float> {
+        let a = Float.random(in: 0..<(2 * .pi))
+        let r = Float.random(in: minR...maxR)
+        let p = playerPos
+        return SIMD3<Float>(p.x + cos(a) * r, p.y, p.z + sin(a) * r)
+    }
+
+    private func face(_ e: Entity, _ dir: SIMD3<Float>) {
+        e.orientation = simd_quatf(angle: atan2(dir.x, dir.z), axis: [0, 1, 0])
+    }
+
+    // MARK: יצירת עכבר ודמות
+
+    private func spawnMouse() {
+        // כל עכבר חדש גדול ומהיר יותר
+        let s = min(1.2 + 0.45 * Float(level), 4.0)
+        let e = makeMouse()
+        e.scale = SIMD3<Float>(repeating: s)
+        let pos = randomSpot(minR: 1.5, maxR: 2.5)
+        e.position = pos
+        root.addChild(e)
+
+        let c = Critter(entity: e, pos: pos, speed: min(0.5 + 0.09 * Float(level), 1.2), scale: s)
+        c.modeUntil = time + 1.5
+        mouse = c
+    }
+
+    private func spawnMinion() {
+        let e = makeBuddy()
+        e.scale = SIMD3<Float>(repeating: 1.2)
+        let pos = randomSpot(minR: 1.5, maxR: 3.0)
+        e.position = pos
+        root.addChild(e)
+        minions.append(Critter(entity: e, pos: pos, speed: 0.3, scale: 1.2))
+    }
+
+    // MARK: סימון הרגל (עיגול על הרצפה)
+
+    private func setupMarker() {
+        markerMat.blending = .transparent(opacity: .init(floatLiteral: 0.45))
+        markerHitMat.blending = .transparent(opacity: .init(floatLiteral: 0.6))
+        let m = ModelEntity(mesh: .generateSphere(radius: 1), materials: [markerMat])
+        m.scale = [0.3, 0.004, 0.3]
+        root.addChild(m)
+        marker = m
+    }
+
+    private func updateMarker(_ player: SIMD3<Float>) {
+        let m = arView.cameraTransform.matrix
+        let f = SIMD3<Float>(-m.columns.2.x, 0, -m.columns.2.z)
+        if length(f) > 0.25 { lastForward = normalize(f) }
+        stompPoint = player + lastForward * 0.6
+        marker?.position = stompPoint + SIMD3<Float>(0, 0.004, 0)
+    }
+
+    // MARK: לולאת המשחק
+
+    private func update(dt rawDt: Float) {
+        guard model.isPlaying, !model.isGameOver, floorY != nil else { return }
+        let dt = min(rawDt, 0.05)
+        time += Double(dt)
+        let player = playerPos
+        updateMarker(player)
+        if let m = mouse { stepMouse(m, player, dt) }
+        for mi in minions { stepMinion(mi, player, dt) }
+    }
+
+    private func stepMouse(_ m: Critter, _ player: SIMD3<Float>, _ dt: Float) {
+        var to = player - m.pos
+        to.y = 0
+        let dist = length(to)
+        let toN = dist > 0.001 ? to / dist : SIMD3<Float>(0, 0, 1)
+
+        if time > m.modeUntil {
+            switch m.mode {
+            case .wander:
+                if Bool.random() {
+                    m.mode = .dash
+                    m.modeUntil = time + Double.random(in: 0.8...1.6)
+                } else {
+                    m.modeUntil = time + Double.random(in: 1.0...2.0)
+                }
+            case .dash, .flee:
+                m.mode = .wander
+                m.modeUntil = time + Double.random(in: 1.0...2.5)
+                m.dir = randomDir()
+            }
+        }
+
+        var speed = m.speed
+        switch m.mode {
+        case .wander:
+            if time > m.nextTurn {
+                m.dir = rotateY(m.dir, by: Float.random(in: -1...1))
+                m.nextTurn = time + Double.random(in: 0.4...0.9)
+            }
+            if dist > 3.5 { m.dir = toN }
+        case .dash:
+            m.dir = toN
+            speed *= 1.7
+        case .flee:
+            m.dir = -toN
+            speed *= 1.3
+        }
+
+        m.pos += m.dir * speed * dt
+        m.entity.position = m.pos
+        face(m.entity, m.dir)
+
+        // נשיכה
+        let biteRadius = 0.18 + 0.07 * m.scale
+        if dist < biteRadius, time > invulnerableUntil, m.mode != .flee {
+            m.mode = .flee
+            m.modeUntil = time + 2
+            loseLife("🐭 העכבר נשך אותך ברגל!")
+        }
+    }
+
+    private func stepMinion(_ c: Critter, _ player: SIMD3<Float>, _ dt: Float) {
+        var to = player - c.pos
+        to.y = 0
+        let dist = length(to)
+
+        if time > c.nextTurn {
+            c.dir = rotateY(c.dir, by: Float.random(in: -1.5...1.5))
+            c.nextTurn = time + Double.random(in: 1.5...3.0)
+        }
+        if dist > 3.2, dist > 0.001 { c.dir = to / dist }
+
+        c.pos += c.dir * c.speed * dt
+        c.entity.position = c.pos
+        face(c.entity, c.dir)
+    }
+
+    // MARK: דריכה
+
+    func stomp() {
+        guard model.isPlaying, !model.isGameOver else { return }
+        UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
+        flashMarker()
+
+        if let m = mouse, hit(m, radius: 0.30 + 0.06 * m.scale) {
+            killMouse(m)
+        }
+        for mi in minions where hit(mi, radius: 0.30) {
+            killMinion(mi)
+        }
+    }
+
+    private func hit(_ c: Critter, radius: Float) -> Bool {
+        let d = c.pos - stompPoint
+        return length(SIMD2<Float>(d.x, d.z)) < radius
+    }
+
+    private func flashMarker() {
+        marker?.model?.materials = [markerHitMat]
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.marker?.model?.materials = [self.markerMat]
+        }
+    }
+
+    private func squash(_ e: Entity) {
+        var t = e.transform
+        t.scale = SIMD3<Float>(e.scale.x * 1.3, e.scale.y * 0.05, e.scale.z * 1.3)
+        e.move(to: t, relativeTo: e.parent, duration: 0.15)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { e.removeFromParent() }
+    }
+
+    private func killMouse(_ m: Critter) {
+        mouse = nil
+        squash(m.entity)
+        level += 1
+        model.score += 1
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+
+        // אחרי שהרגת עכבר מגיע עכבר גדול יותר
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, self.model.isPlaying, !self.model.isGameOver, self.mouse == nil else { return }
+            self.spawnMouse()
+        }
+    }
+
+    private func killMinion(_ c: Critter) {
+        minions.removeAll { $0 === c }
+        squash(c.entity)
+        loseLife("😢 דרכת על הדמות הצהובה!")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, self.model.isPlaying, !self.model.isGameOver, self.minions.count < 2 else { return }
+            self.spawnMinion()
+        }
+    }
+
+    // MARK: חיים
+
+    private func loseLife(_ why: String) {
+        invulnerableUntil = time + 1.5
+        model.lives = max(0, model.lives - 1)
+        UINotificationFeedbackGenerator().notificationOccurred(.error)
+        showToast(why)
+        if model.lives == 0 { model.isGameOver = true }
+    }
+
+    private func showToast(_ text: String) {
+        model.toast = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            if self?.model.toast == text { self?.model.toast = nil }
+        }
+    }
+}
+
+// MARK: - תצוגה
+
+struct ARViewContainer: UIViewRepresentable {
+    let arView: ARView
+    func makeUIView(context: Context) -> ARView { arView }
+    func updateUIView(_ uiView: ARView, context: Context) {}
+}
+
+struct ContentView: View {
+    @StateObject private var game = GameController()
+
+    var body: some View {
+        ZStack {
+            ARViewContainer(arView: game.arView).ignoresSafeArea()
+            HUDView(model: game.model, onStomp: game.stomp, onRestart: game.resetRound)
+        }
+        .onAppear { game.start() }
+    }
+}
+
+struct HUDView: View {
+    @ObservedObject var model: GameModel
+    var onStomp: () -> Void
+    var onRestart: () -> Void
+
+    var body: some View {
+        ZStack {
+            VStack {
+                HStack {
+                    Text(String(repeating: "❤️", count: max(0, model.lives)) +
+                         String(repeating: "🖤", count: max(0, 3 - model.lives)))
+                        .font(.largeTitle)
+                    Spacer()
+                    Text("🐭 \(model.score)")
+                        .font(.largeTitle.bold())
+                        .foregroundStyle(.white)
+                }
+                .padding()
+                .background(.black.opacity(0.35))
+
+                if let t = model.toast {
+                    Text(t)
+                        .font(.title3.bold())
+                        .padding(12)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                }
+
+                Spacer()
+
+                if !model.status.isEmpty {
+                    Text(model.status)
+                        .multilineTextAlignment(.center)
+                        .font(.headline)
+                        .padding(14)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        .padding()
+                }
+
+                if model.isPlaying && !model.isGameOver {
+                    Button(action: onStomp) {
+                        Text("👣 דרוך!")
+                            .font(.system(size: 34, weight: .heavy))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 22)
+                            .background(Color.red, in: RoundedRectangle(cornerRadius: 24))
+                            .padding(.horizontal, 30)
+                    }
+                    .padding(.bottom, 20)
+                }
+            }
+
+            if model.isGameOver {
+                VStack(spacing: 18) {
+                    Text("GAME OVER").font(.system(size: 44, weight: .black))
+                    Text("הרגת \(model.score) עכברים").font(.title)
+                    Button("שחק שוב", action: onRestart)
+                        .font(.title2.bold())
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+                }
+                .foregroundStyle(.white)
+                .padding(40)
+                .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 24))
+            }
+        }
+    }
+}
